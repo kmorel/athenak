@@ -3,6 +3,7 @@
 from pathlib import Path
 import struct
 import sys
+import types
 import xml.etree.ElementTree as ET
 
 import h5py
@@ -15,6 +16,7 @@ if str(PYTHON_VIS) not in sys.path:
 
 import bin_convert  # noqa: E402
 from cr_visualization import cr_data  # noqa: E402
+from cr_visualization import adios2_export  # noqa: E402
 from cr_visualization import xdmf_export  # noqa: E402
 
 
@@ -390,3 +392,122 @@ def test_xdmf_complete_tracks_split_periodic_jumps(tmp_path: Path) -> None:
         )
     assert metadata["tracks"]["geometry"] == "complete_periodic"
     assert metadata["tracks"]["topology"] == "Mixed"
+
+
+def test_adios2_mesh_and_fides_model(tmp_path: Path) -> None:
+    binary = tmp_path / "test.bin"
+    write_binary(binary)
+    blocks = cr_data.read_rank_meshblocks(binary, quantities=["dens", "bcc1"])
+    schema = adios2_export.mesh_schema(blocks[0])
+    arrays = adios2_export.prepare_mesh_arrays(blocks, schema)
+
+    assert arrays["points"].shape == (54, 3)
+    assert arrays["connectivity"].shape == (128,)
+    connectivity = arrays["connectivity"].reshape(-1, 8)
+    assert np.array_equal(connectivity[0], [0, 1, 4, 3, 9, 10, 13, 12])
+    assert np.array_equal(connectivity[8], [27, 28, 31, 30, 36, 37, 40, 39])
+    assert arrays["cell_data/dens"].shape == (16,)
+
+    model = adios2_export.fides_model("result.mesh.bp", arrays, "hexahedron")
+    data = model["AthenaK"]
+    assert data["data_sources"][0]["filename"] == "result.mesh.bp"
+    assert data["cell_set"]["cell_type"] == "hexahedron"
+    assert {field["name"] for field in data["fields"]} == {"dens", "bcc1"}
+    assert all(field["association"] == "cell_set" for field in data["fields"])
+
+
+def test_adios2_tracks_split_periodic_segments(tmp_path: Path) -> None:
+    merged = tmp_path / "tracks.h5"
+    write_merged_tracks(merged)
+    tracks = cr_data.read_merged_track_subset(merged, [1])
+    arrays = adios2_export.prepare_track_arrays(
+        tracks,
+        domain_bounds=np.array([[0, 1], [0, 1], [0, 1]]),
+        periodic_axes=(0,),
+    )
+
+    assert arrays["points"].shape == (3, 3)
+    assert np.array_equal(arrays["connectivity"], [0, 1, 1, 2])
+    assert np.allclose(arrays["point_data/particle_velocity"][0], [3, 4, 0])
+    assert np.allclose(arrays["point_data/mu_M"], 4.0)
+    assert np.array_equal(arrays["cell_data/output_tag"], [1, 1])
+
+    tracks["values"][0, :, 0] = [0.8, 0.1, 0.2]
+    arrays = adios2_export.prepare_track_arrays(
+        tracks,
+        domain_bounds=np.array([[0, 1], [0, 1], [0, 1]]),
+        periodic_axes=(0,),
+    )
+    assert np.array_equal(arrays["connectivity"], [1, 2])
+
+
+def test_adios2_output_paths() -> None:
+    paths = adios2_export.output_paths("run.bp")
+    assert paths["mesh_bp"] == Path("run.mesh.bp")
+    assert paths["tracks_json"] == Path("run.tracks.json")
+
+
+def test_adios2_writer_uses_local_blocks(tmp_path: Path, monkeypatch) -> None:
+    binary = tmp_path / "test.bin"
+    write_binary(binary)
+    blocks = cr_data.read_rank_meshblocks(binary, quantities=["dens"])
+    schema = adios2_export.mesh_schema(blocks[0])
+    array_blocks = [
+        adios2_export.prepare_mesh_arrays([block], schema) for block in blocks
+    ]
+    puts = []
+
+    class FakeEngine:
+        def begin_step(self):
+            pass
+
+        def put(self, variable, array, mode):
+            puts.append((variable, np.array(array), mode))
+
+        def end_step(self):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeIO:
+        def define_variable(self, name, content, shape, start, count, constant):
+            assert shape == [] and start == []
+            return name
+
+        def define_attribute(self, name, value):
+            pass
+
+        def open(self, filename, mode):
+            return FakeEngine()
+
+    class FakeAdios:
+        def __init__(self, comm):
+            pass
+
+        def declare_io(self, name):
+            return FakeIO()
+
+    fake_adios2 = types.SimpleNamespace(
+        Adios=FakeAdios,
+        Mode=types.SimpleNamespace(Write="write", Sync="sync"),
+    )
+    monkeypatch.setitem(sys.modules, "adios2", fake_adios2)
+
+    class FakeComm:
+        @staticmethod
+        def allreduce(value):
+            return value
+
+    totals = adios2_export.write_bp(
+        tmp_path / "mesh.bp",
+        array_blocks[0],
+        FakeComm(),
+        array_blocks=iter(array_blocks),
+    )
+    assert totals["points"] == 54
+    assert totals["connectivity"] == 128
+    connectivity_puts = [array for name, array, _ in puts if name == "connectivity"]
+    assert len(connectivity_puts) == 2
+    assert connectivity_puts[0][0] == 0
+    assert connectivity_puts[1][0] == 0

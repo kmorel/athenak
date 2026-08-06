@@ -230,6 +230,29 @@ collection; field and trajectory arrays are never gathered. Keep all pieces
 beside the `.xmf` file. Both viewers can distribute the collection's spatial
 blocks across their rendering processes.
 
+An ADIOS2/Fides alternative writes collective BP datasets instead of per-rank
+HDF5 pieces:
+
+```bash
+srun -N 16 -n 128 \
+  python3 vis/python/cr_visualization/export_full_dataset_adios2_mpi.py \
+  --mhd-rank0 "$MHD_ROOT/rank_00000000/Pm1_S4_eta3e-6.full_mhd_w_bcc.00024.bin" \
+  --merged-tracks "$RUN/$BASE.tracks.h5" \
+  --output "$RUN/Pm1_full_stride20" \
+  --quantities velx vely velz bcc1 bcc2 bcc3 \
+  --time-stride 20 \
+  --particle-batch 4
+```
+
+This creates `Pm1_full_stride20.mesh.bp`,
+`Pm1_full_stride20.tracks.bp`, and a matching `.mesh.json` and `.tracks.json`
+Fides data model. Open either JSON file with a Fides-capable reader. The mesh
+is represented as explicit hexahedra, which preserves independent MeshBlock
+coordinates. Tracks are represented by two-point line cells; segments that
+cross a periodic domain boundary are omitted so they do not draw across the
+domain. The ADIOS2 Python bindings must have MPI support and use the same MPI
+implementation as `mpi4py`.
+
 The exporter writes a new copy of every selected MHD field and track sample.
 At full fidelity that is intentionally expensive: Pm1 contains about 2 TiB of
 MHD data and 7.8 billion trajectory points. First export a narrow quantity set,
