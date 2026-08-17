@@ -399,19 +399,32 @@ def test_adios2_mesh_and_fides_model(tmp_path: Path) -> None:
     write_binary(binary)
     blocks = cr_data.read_rank_meshblocks(binary, quantities=["dens", "bcc1"])
     schema = adios2_export.mesh_schema(blocks[0])
-    arrays = adios2_export.prepare_mesh_arrays(blocks, schema)
+    arrays = adios2_export.prepare_mesh_arrays(blocks[:1], schema)
 
-    assert arrays["points"].shape == (54, 3)
-    assert arrays["connectivity"].shape == (128,)
-    connectivity = arrays["connectivity"].reshape(-1, 8)
-    assert np.array_equal(connectivity[0], [0, 1, 4, 3, 9, 10, 13, 12])
-    assert np.array_equal(connectivity[8], [27, 28, 31, 30, 36, 37, 40, 39])
-    assert arrays["cell_data/dens"].shape == (16,)
+    assert np.array_equal(arrays["x"], blocks[0]["x1f"])
+    assert np.array_equal(arrays["y"], blocks[0]["x2f"])
+    assert np.array_equal(arrays["z"], blocks[0]["x3f"])
+    assert arrays["point_dimensions"].shape == (3, 3, 3)
+    assert arrays["point_dimensions"].dtype == np.uint8
+    assert arrays["point_dimensions"].shape == (
+        arrays["z"].size,
+        arrays["y"].size,
+        arrays["x"].size,
+    )
+    assert arrays["cell_data/dens"].shape == (2, 2, 2)
 
-    model = adios2_export.fides_model("result.mesh.bp", arrays, "hexahedron")
+    model = adios2_export.fides_rectilinear_model("result.mesh.bp", arrays)
     data = model["AthenaK"]
     assert data["data_sources"][0]["filename"] == "result.mesh.bp"
-    assert data["cell_set"]["cell_type"] == "hexahedron"
+    coordinates = data["coordinate_system"]["array"]
+    assert coordinates["array_type"] == "cartesian_product"
+    assert coordinates["x_array"]["variable"] == "x"
+    assert coordinates["y_array"]["variable"] == "y"
+    assert coordinates["z_array"]["variable"] == "z"
+    assert data["cell_set"]["cell_set_type"] == "structured"
+    dimensions = data["cell_set"]["dimensions"]
+    assert dimensions["variable"] == "point_dimensions"
+    assert "association" not in dimensions
     assert {field["name"] for field in data["fields"]} == {"dens", "bcc1"}
     assert all(field["association"] == "cell_set" for field in data["fields"])
 
@@ -505,9 +518,9 @@ def test_adios2_writer_uses_local_blocks(tmp_path: Path, monkeypatch) -> None:
         FakeComm(),
         array_blocks=iter(array_blocks),
     )
-    assert totals["points"] == 54
-    assert totals["connectivity"] == 128
-    connectivity_puts = [array for name, array, _ in puts if name == "connectivity"]
-    assert len(connectivity_puts) == 2
-    assert connectivity_puts[0][0] == 0
-    assert connectivity_puts[1][0] == 0
+    assert totals["x"] == 6
+    assert totals["point_dimensions"] == 6
+    assert not any(name in ("points", "connectivity") for name, _, _ in puts)
+    coordinate_puts = [array for name, array, _ in puts if name == "x"]
+    assert len(coordinate_puts) == 2
+    assert all(array.shape == (3,) for array in coordinate_puts)

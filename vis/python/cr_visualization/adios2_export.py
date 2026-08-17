@@ -73,97 +73,65 @@ def mesh_schema(block: dict) -> dict:
         "fields": fields,
         "vectors": vectors,
         "scalars": scalars,
+        "shape": np.asarray(block[fields[0]]).shape,
         "dtype": np.asarray(block[fields[0]]).dtype.str,
         "coordinate_dtype": np.asarray(block["x1f"]).dtype.str,
     }
 
 
-def _block_points(block: dict) -> np.ndarray:
-    z, y, x = np.meshgrid(
-        np.asarray(block["x3f"]),
-        np.asarray(block["x2f"]),
-        np.asarray(block["x1f"]),
-        indexing="ij",
-    )
-    return np.ascontiguousarray(np.stack((x, y, z), axis=-1).reshape(-1, 3))
-
-
-def _block_connectivity(shape: Sequence[int], point_offset: int) -> np.ndarray:
-    nz, ny, nx = (int(value) for value in shape)
-    plane = (ny + 1) * (nx + 1)
-    row = nx + 1
-    iz, iy, ix = np.meshgrid(
-        np.arange(nz, dtype=np.int64),
-        np.arange(ny, dtype=np.int64),
-        np.arange(nx, dtype=np.int64),
-        indexing="ij",
-    )
-    base = (iz * plane + iy * row + ix).reshape(-1) + point_offset
-    return np.ascontiguousarray(
-        np.column_stack(
-            (
-                base,
-                base + 1,
-                base + row + 1,
-                base + row,
-                base + plane,
-                base + plane + 1,
-                base + plane + row + 1,
-                base + plane + row,
-            )
-        )
-    )
-
-
-def prepare_mesh_arrays(meshblocks: Sequence[dict], schema: dict) -> dict[str, np.ndarray]:
-    """Pack local MeshBlocks into an explicit hexahedral mesh."""
+def prepare_mesh_arrays(
+    meshblocks: Sequence[dict], schema: dict
+) -> dict[str, np.ndarray]:
+    """Pack zero or one MeshBlock as a rectilinear-grid ADIOS block."""
 
     dtype = np.dtype(schema["dtype"])
-    points_parts = []
-    connectivity_parts = []
-    field_parts: dict[str, list[np.ndarray]] = {
-        name: [] for name in (*schema["scalars"], *schema["vectors"])
-    }
-    point_offset = 0
-    for block in meshblocks:
-        fields = tuple(block["VariableNames"])
-        if fields != tuple(schema["fields"]):
-            raise ValueError("all MeshBlocks must contain the same fields in the same order")
-        shape = np.asarray(block[fields[0]]).shape
-        points = _block_points(block)
-        points_parts.append(points)
-        connectivity_parts.append(_block_connectivity(shape, point_offset))
-        point_offset += points.shape[0]
-        for name in schema["scalars"]:
-            field_parts[name].append(np.asarray(block[name]).reshape(-1))
-        for name, components in schema["vectors"].items():
-            field_parts[name].append(
-                np.stack([np.asarray(block[item]) for item in components], axis=-1)
-                .reshape(-1, 3)
-            )
-
+    shape = tuple(schema["shape"])
+    point_shape = tuple(size + 1 for size in shape)
     coordinate_dtype = np.dtype(schema["coordinate_dtype"])
+    if not meshblocks:
+        empty_shape = (0, *shape[1:])
+        empty_point_shape = (0, *point_shape[1:])
+        arrays = {
+            "x": np.empty((0,), dtype=coordinate_dtype),
+            "y": np.empty((0,), dtype=coordinate_dtype),
+            "z": np.empty((0,), dtype=coordinate_dtype),
+            "point_dimensions": np.empty(empty_point_shape, dtype=np.uint8),
+        }
+        for name in schema["scalars"]:
+            arrays[f"cell_data/{_safe_name(name)}"] = np.empty(
+                empty_shape, dtype=dtype
+            )
+        for name in schema["vectors"]:
+            arrays[f"cell_data/{_safe_name(name)}"] = np.empty(
+                (*empty_shape, 3), dtype=dtype
+            )
+        return arrays
+    if len(meshblocks) != 1:
+        raise ValueError("each rectilinear ADIOS block must contain one MeshBlock")
+
+    block = meshblocks[0]
+    fields = tuple(block["VariableNames"])
+    if fields != tuple(schema["fields"]):
+        raise ValueError(
+            "all MeshBlocks must contain the same fields in the same order"
+        )
+    if np.asarray(block[fields[0]]).shape != shape:
+        raise ValueError("all MeshBlocks must have the same cell dimensions")
+
     arrays = {
-        "points": (
-            np.concatenate(points_parts)
-            if points_parts
-            else np.empty((0, 3), coordinate_dtype)
-        ),
-        "connectivity": (
-            np.concatenate(connectivity_parts).reshape(-1)
-            if connectivity_parts
-            else np.empty((0,), dtype=np.int64)
-        ),
+        "x": np.asarray(block["x1f"]),
+        "y": np.asarray(block["x2f"]),
+        "z": np.asarray(block["x3f"]),
+        # Fides needs a scalar variable to determine structured point
+        # dimensions. Store point dimensions directly for compatibility with
+        # readers that predate cell-associated dimension adjustment.
+        "point_dimensions": np.zeros(point_shape, dtype=np.uint8),
     }
     for name in schema["scalars"]:
-        parts = field_parts[name]
-        arrays[f"cell_data/{_safe_name(name)}"] = (
-            np.concatenate(parts) if parts else np.empty((0,), dtype=dtype)
-        )
-    for name in schema["vectors"]:
-        parts = field_parts[name]
-        arrays[f"cell_data/{_safe_name(name)}"] = (
-            np.concatenate(parts) if parts else np.empty((0, 3), dtype=dtype)
+        arrays[f"cell_data/{_safe_name(name)}"] = np.asarray(block[name])
+    for name, components in schema["vectors"].items():
+        arrays[f"cell_data/{_safe_name(name)}"] = np.stack(
+            [np.asarray(block[item]) for item in components], axis=-1
         )
     return {name: np.ascontiguousarray(value) for name, value in arrays.items()}
 
@@ -316,9 +284,12 @@ def write_bp(
         engine.begin_step()
         blocks = (arrays,) if array_blocks is None else array_blocks
         for block in blocks:
-            active = bool(
-                block["points"].shape[0] and block["connectivity"].shape[0]
-            )
+            if "connectivity" in block:
+                active = bool(
+                    block["points"].shape[0] and block["connectivity"].shape[0]
+                )
+            else:
+                active = all(block[axis].shape[0] for axis in ("x", "y", "z"))
             if not active:
                 continue
             if set(block) != set(variables):
@@ -383,6 +354,49 @@ def fides_model(bp_filename: str | Path, arrays: Mapping[str, np.ndarray], cell_
                 "data_source": "source",
                 "variable": "connectivity",
                 "static": True,
+            },
+            "fields": fields,
+        }
+    }
+
+
+def fides_rectilinear_model(
+    bp_filename: str | Path, arrays: Mapping[str, np.ndarray]
+) -> dict:
+    """Build a Fides model for MeshBlock-local rectilinear grids."""
+
+    fields = [
+        _field(name, "cell_set", array.ndim == 4)
+        for name, array in arrays.items()
+        if name.startswith("cell_data/")
+    ]
+    coordinate = {
+        "array_type": "cartesian_product",
+        **{
+            f"{axis}_array": {
+                "array_type": "basic",
+                "data_source": "source",
+                "variable": axis,
+                "static": True,
+            }
+            for axis in ("x", "y", "z")
+        },
+    }
+    return {
+        "AthenaK": {
+            "data_sources": [{
+                "name": "source",
+                "filename_mode": "relative",
+                "filename": Path(bp_filename).name,
+            }],
+            "coordinate_system": {"array": coordinate},
+            "cell_set": {
+                "cell_set_type": "structured",
+                "dimensions": {
+                    "source": "variable_dimensions",
+                    "data_source": "source",
+                    "variable": "point_dimensions",
+                },
             },
             "fields": fields,
         }
