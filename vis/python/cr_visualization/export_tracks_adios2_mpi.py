@@ -35,6 +35,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--time-stride", type=int, default=1)
     parser.add_argument("--particle-batch", type=int, default=4)
     parser.add_argument(
+        "--max-tracks",
+        type=int,
+        help="maximum number of tracks to export, sampled across the input",
+    )
+    parser.add_argument(
         "--domain-bounds",
         nargs=6,
         type=float,
@@ -51,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.periodic_axes and args.domain_bounds is None:
         parser.error("--periodic-axes requires --domain-bounds")
+    if args.max_tracks is not None and args.max_tracks < 1:
+        parser.error("--max-tracks must be at least one")
     return args
 
 
@@ -89,6 +96,7 @@ def main() -> None:
         time_stride=args.time_stride,
         fields=fields,
         particle_batch=args.particle_batch,
+        max_tracks=args.max_tracks,
     )
     domain_bounds = (
         np.asarray(args.domain_bounds).reshape(3, 2)

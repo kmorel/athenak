@@ -262,6 +262,18 @@ def test_merged_subset_partition_and_bundle(tmp_path: Path) -> None:
             handle["values"][:],
         )
 
+    limited_parts = [
+        cr_data.read_merged_track_partition(
+            merged, partition, 2, max_tracks=2
+        )
+        for partition in range(2)
+    ]
+    limited_rows = np.concatenate(
+        [part["source_rows"] for part in limited_parts]
+    )
+    assert np.array_equal(limited_rows, [0, 2])
+    assert sum(part["values"].shape[0] for part in limited_parts) == 2
+
     block = cr_data.read_meshblock(binary, 1, quantities=["dens"])
     cr_data.write_meshblock_bundle(bundle, block, subset)
     with h5py.File(bundle, "r") as handle:
@@ -475,6 +487,8 @@ def test_adios2_writer_uses_local_blocks(tmp_path: Path, monkeypatch) -> None:
             pass
 
         def put(self, variable, array, mode):
+            assert array.flags.c_contiguous
+            assert array.flags.writeable
             puts.append((variable, np.array(array), mode))
 
         def end_step(self):
@@ -486,6 +500,8 @@ def test_adios2_writer_uses_local_blocks(tmp_path: Path, monkeypatch) -> None:
     class FakeIO:
         def define_variable(self, name, content, shape, start, count, constant):
             assert shape == [] and start == []
+            assert content.flags.c_contiguous
+            assert content.flags.writeable
             return name
 
         def define_attribute(self, name, value):
@@ -511,6 +527,10 @@ def test_adios2_writer_uses_local_blocks(tmp_path: Path, monkeypatch) -> None:
         @staticmethod
         def allreduce(value):
             return value
+
+    readonly = array_blocks[0]["x"].view()
+    readonly.flags.writeable = False
+    array_blocks[0]["x"] = readonly
 
     totals = adios2_export.write_bp(
         tmp_path / "mesh.bp",

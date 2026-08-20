@@ -411,13 +411,25 @@ def read_merged_track_partition(
     time_stride: int = 1,
     fields: Sequence[str] | None = None,
     particle_batch: int = 4,
+    max_tracks: int | None = None,
 ) -> dict:
-    """Read one contiguous particle-row partition from a merged track file."""
+    """Read one partition of particle rows from a merged track file."""
 
     with h5py.File(filename, "r") as handle:
         nrows = handle["values"].shape[0]
-        row_start = partition * nrows // num_partitions
-        row_stop = (partition + 1) * nrows // num_partitions
+        if max_tracks is not None and max_tracks < 1:
+            raise ValueError("max_tracks must be at least one")
+        if max_tracks is not None and max_tracks < nrows:
+            source_rows = np.linspace(
+                0, nrows - 1, num=max_tracks, dtype=np.int64
+            )
+            row_start = partition * source_rows.size // num_partitions
+            row_stop = (partition + 1) * source_rows.size // num_partitions
+            source_rows = source_rows[row_start:row_stop]
+        else:
+            row_start = partition * nrows // num_partitions
+            row_stop = (partition + 1) * nrows // num_partitions
+            source_rows = np.arange(row_start, row_stop, dtype=np.int64)
         times_all = handle["times"][:]
         time_slice = _time_slice(times_all, time_min, time_max, time_stride)
         values_ds = handle["values"]
@@ -426,19 +438,19 @@ def read_merged_track_partition(
         if particle_batch < 1:
             raise ValueError("particle_batch must be at least one")
         values = np.empty(
-            (row_stop - row_start, times_all[time_slice].size, len(selected_names)),
+            (source_rows.size, times_all[time_slice].size, len(selected_names)),
             dtype=values_ds.dtype,
         )
-        for begin in range(row_start, row_stop, particle_batch):
-            end = min(begin + particle_batch, row_stop)
+        for begin in range(0, source_rows.size, particle_batch):
+            end = min(begin + particle_batch, source_rows.size)
             complete = values_ds[
-                begin:end, time_slice.start:time_slice.stop, :
+                source_rows[begin:end], time_slice.start:time_slice.stop, :
             ][:, ::time_slice.step, :]
             output = complete if fields is None else complete[..., selected_indices]
-            values[begin - row_start:end - row_start] = output
+            values[begin:end] = output
         return {
-            "particles": handle["particles"][row_start:row_stop],
-            "source_rows": np.arange(row_start, row_stop, dtype=np.int64),
+            "particles": handle["particles"][source_rows],
+            "source_rows": source_rows,
             "times": times_all[time_slice],
             "cycles": handle["cycles"][time_slice],
             "values": values,

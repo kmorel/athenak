@@ -264,7 +264,10 @@ def write_bp(
     variables = {}
     definition_shapes = {}
     for name, input_array in arrays.items():
-        array = np.ascontiguousarray(input_array)
+        # ADIOS2's Python bindings require writable buffers.  In particular,
+        # np.broadcast_to can produce a read-only array that is already
+        # C-contiguous, so np.ascontiguousarray alone does not make it usable.
+        array = np.require(input_array, requirements=("C", "W"))
         # An empty rank still participates in collective Open/Close.  Give its
         # unused definition a nonzero first dimension because some ADIOS2
         # versions reject a local-array Count containing zero.
@@ -295,7 +298,7 @@ def write_bp(
             if set(block) != set(variables):
                 raise ValueError("all ADIOS2 blocks must contain the same variables")
             for name, variable in variables.items():
-                array = np.ascontiguousarray(block[name])
+                array = np.require(block[name], requirements=("C", "W"))
                 if array.shape != definition_shapes[name]:
                     raise ValueError(
                         f"ADIOS2 local blocks for {name} have inconsistent shapes: "
