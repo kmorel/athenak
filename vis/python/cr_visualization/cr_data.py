@@ -411,15 +411,21 @@ def read_merged_track_partition(
     time_stride: int = 1,
     fields: Sequence[str] | None = None,
     particle_batch: int = 4,
+    source_rows: list | None = None,
     max_tracks: int | None = None,
 ) -> dict:
     """Read one partition of particle rows from a merged track file."""
 
     with h5py.File(filename, "r") as handle:
         nrows = handle["values"].shape[0]
-        if max_tracks is not None and max_tracks < 1:
-            raise ValueError("max_tracks must be at least one")
-        if max_tracks is not None and max_tracks < nrows:
+        if source_rows is not None:
+            nrows = len(source_rows)
+            row_start = partition * nrows // num_partitions
+            row_stop = (partition + 1) * nrows // num_partitions
+            source_rows = np.array(source_rows[row_start:row_stop], dtype=np.int64)
+        elif max_tracks is not None and max_tracks < nrows:
+            if max_tracks < 1:
+                raise ValueError("max_tracks must be at least one")
             source_rows = np.linspace(
                 0, nrows - 1, num=max_tracks, dtype=np.int64
             )

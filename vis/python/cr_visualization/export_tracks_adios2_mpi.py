@@ -24,6 +24,8 @@ from cr_visualization.adios2_export import (  # noqa: E402
 )
 from cr_visualization.cr_data import read_merged_track_partition  # noqa: E402
 
+def intlist(s: str) -> list:
+    return [int(num) for num in s.split()]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -34,6 +36,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--time-max", type=float)
     parser.add_argument("--time-stride", type=int, default=1)
     parser.add_argument("--particle-batch", type=int, default=4)
+    parser.add_argument(
+        "--source-rows", 
+        type=intlist,
+        help="Space separated list of tracks to export identified by row number",
+    )
     parser.add_argument(
         "--max-tracks",
         type=int,
@@ -96,6 +103,7 @@ def main() -> None:
         time_stride=args.time_stride,
         fields=fields,
         particle_batch=args.particle_batch,
+        source_rows=args.source_rows,
         max_tracks=args.max_tracks,
     )
     domain_bounds = (
