@@ -23,14 +23,44 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tracks_h5")
     parser.add_argument("--out", default="particle_track.png")
-    parser.add_argument("--row", type=int)
-    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--row",
+        type=int,
+        help="specific track to plot (as identified by the row in the input data)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=1,
+        help="seed to use when picking a random track (ignored if --row specified)"
+    )
     parser.add_argument("--b-rms", type=float)
     parser.add_argument("--history-file", type=Path)
     parser.add_argument("--min-mass", type=float)
     parser.add_argument("--mass-log-spacing", type=float)
-    parser.add_argument("--smooth", type=int, default=256)
-    parser.add_argument("--tmax", type=float, default=5.0)
+    parser.add_argument(
+        "--smooth",
+        type=int,
+        default=256,
+        help="window size to use for rolling mean",
+    )
+    parser.add_argument(
+        "--tmin",
+        type=float,
+        default=0.0,
+        help="time value to start plotting from",
+    )
+    parser.add_argument(
+        "--tmax",
+        type=float,
+        default=5.0,
+        help="time value to stop plotting at",
+    )
+    parser.add_argument(
+        "--abs-time",
+        action='store_true',
+        help="use absolute time (otherwise time is relative to first time index)"
+    )
     return parser.parse_args()
 
 
@@ -133,13 +163,18 @@ def main() -> None:
 
         time_abs = handle["times"][:]
         time_rel = time_abs - time_abs[0]
-        nt = np.searchsorted(time_rel, opt.tmax, side="right")
+        if opt.abs_time:
+            time_sel = time_abs
+        else:
+            time_sel = time_rel
+        left_index = np.searchsorted(time_sel, opt.tmin, side="left")
+        right_index = np.searchsorted(time_sel, opt.tmax, side="right")
 
-        data = handle["values"][row, :nt, :]
+        data = handle["values"][row, left_index:right_index, :]
         particle = handle["particles"][row]
         source_run_dir = handle.attrs.get("source_run_dir", Path(opt.tracks_h5).parent)
         run_dir = Path(h5_string(source_run_dir))
-        time = time_rel[:nt]
+        time = time_sel[left_index:right_index]
 
     velocity = data[:, [field["vx"], field["vy"], field["vz"]]]
     magnetic_field = data[:, [field["bx"], field["by"], field["bz"]]]

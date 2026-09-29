@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-rows", 
         type=intlist,
-        help="Space separated list of tracks to export identified by row number",
+        help="space separated list of tracks to export identified by row number",
     )
     parser.add_argument(
         "--max-tracks",
